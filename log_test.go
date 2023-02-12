@@ -12,6 +12,42 @@ import (
 	"github.com/octu0/wal/codec"
 )
 
+func Example() {
+	dir, err := os.MkdirTemp("", "testdir")
+	if err != nil {
+		panic(err)
+	}
+
+	log, err := Open(dir)
+	if err != nil {
+		panic(err)
+	}
+
+	i1, _ := log.Write([]byte("data1"))
+	i2, _ := log.Write([]byte("data2"))
+	_ = log.WriteAt(Index(100), []byte("data3"))
+
+	data1, _ := log.Read(i1)
+	fmt.Println(string(data1))
+
+	data3, _ := log.Read(Index(100))
+	fmt.Println(string(data3))
+
+	// delete logs on memory
+	if err := log.Delete(i1, i2); err != nil {
+		panic(err)
+	}
+
+	// compaction of deleted logs to free disk space
+	if err := log.Compact(); err != nil {
+		panic(err)
+	}
+
+	// Output:
+	// data1
+	// data3
+}
+
 func TestLog(t *testing.T) {
 	t.Run("Write/Len/Read", func(tt *testing.T) {
 		dir, err := os.MkdirTemp("", "waltest-*")

@@ -19,31 +19,31 @@ $ go get github.com/octu0/wal
 import "github.com/octu0/wal"
 
 func main() {
-  log, err := wal.Open("/path/to/dir", wal.WithSync(true))
-  if err != nil {
-    panic(err)
-  }
+	log, err := Open("/path/to/dir", wal.WithSync(true))
+	if err != nil {
+		panic(err)
+	}
   defer log.Close()
 
-  i1, err := wal.Write([]byte("data1"))
-  i2, err := wal.Write([]byte("data2"))
-  i3, err := wal.Write([]byte("data3"))
+	i1, err := log.Write([]byte("data1"))
+	i2, err := log.Write([]byte("data2"))
+	err := log.WriteAt(Index(100), []byte("data3"))
 
-  data, err := wal.Read(i1)
-  if err != nil {
-    panic(err)
-  }
-  println(string(data)) // => "data1"
+	data1, _ := log.Read(i1)
+	println(string(data1)) // => "data1"
 
-  // delete log on memory
-  if err := log.Delete(i1, i2); err != nil {
-    panic(err)
-  }
+	data3, _ := log.Read(Index(100))
+	println(string(data3)) // => "data3"
 
-  // compaction deleted logs
-  if err := log.Compact(); err != nil {
-    panic(err)
-  }
+	// delete logs on memory
+	if err := log.Delete(i1, i2); err != nil {
+		panic(err)
+	}
+
+	// compaction of deleted logs to free disk space
+	if err := log.Compact(); err != nil {
+		panic(err)
+	}
 }
 ```
 
