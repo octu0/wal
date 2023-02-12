@@ -23,7 +23,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-  defer log.Close()
+	defer log.Close()
 
 	i1, err := log.Write([]byte("data1"))
 	i2, err := log.Write([]byte("data2"))
