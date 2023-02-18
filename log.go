@@ -242,13 +242,14 @@ func (l *Log) compactRunning() bool {
 	return l.compacting
 }
 
-func (l *Log) copyLatest() (*Log, error) {
+func (l *Log) copyLatest() (*Log, position, error) {
 	l.mutex.RLock()
 	defer l.mutex.RUnlock()
 
+	prevPos := l.lastPos
 	newLog, err := openLog(l.dir, walTempFileName, WithSync(false), WithWriteBufferSize(l.opt.writeBufferSize))
 	if err != nil {
-		return nil, errors.WithStack(err)
+		return nil, position{}, errors.WithStack(err)
 	}
 
 	// sequencial read (reduce seek)
@@ -265,17 +266,38 @@ func (l *Log) copyLatest() (*Log, error) {
 
 		data, err := l.decodeAtLocked(pos)
 		if err != nil {
-			return nil, errors.WithStack(err)
+			return nil, position{}, errors.WithStack(err)
 		}
 		if _, err := newLog.writeLocked(idx, data, false); err != nil {
-			return nil, errors.WithStack(err)
+			return nil, position{}, errors.WithStack(err)
 		}
 	}
 
-	if err := newLog.Close(); err != nil {
-		return nil, errors.WithStack(err)
+	return newLog, prevPos, nil
+}
+
+func (l *Log) copyBehindLocked(newLog *Log, prevPos position, targetPos position) error {
+	f, err := os.OpenFile(l.wfile.Name(), os.O_RDONLY, os.FileMode(0600))
+	if err != nil {
+		return errors.WithStack(err)
 	}
-	return newLog, nil
+	defer f.Close()
+
+	lim := io.NewSectionReader(f, int64(prevPos.offset+prevPos.size), int64(l.lastPos.offset+l.lastPos.size))
+	dec := codec.NewDecoder(lim)
+	for {
+		head, data, err := dec.Decode()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return errors.WithStack(err)
+		}
+		if _, err := newLog.writeLocked(Index(head.ID), data, false); err != nil {
+			return errors.WithStack(err)
+		}
+	}
+	return nil
 }
 
 func (l *Log) Compact() error {
@@ -302,7 +324,7 @@ func (l *Log) Compact() error {
 		return errors.WithStack(err)
 	}
 
-	newLog, err := l.copyLatest()
+	newLog, prevPos, err := l.copyLatest()
 	if err != nil {
 		return errors.WithStack(err)
 	}
@@ -311,6 +333,14 @@ func (l *Log) Compact() error {
 	defer l.mutex.Unlock()
 
 	if err := l.closeLocked(false); err != nil {
+		return errors.WithStack(err)
+	}
+	if prevPos.offset < l.lastPos.offset {
+		if err := l.copyBehindLocked(newLog, prevPos, l.lastPos); err != nil {
+			return errors.WithStack(err)
+		}
+	}
+	if err := newLog.closeLocked(false); err != nil {
 		return errors.WithStack(err)
 	}
 	if err := os.Rename(newLog.wfile.Name(), l.wfile.Name()); err != nil {

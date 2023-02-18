@@ -2,10 +2,13 @@ package wal
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
+	"sort"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/pkg/errors"
 
@@ -504,4 +507,86 @@ func TestLogCompact(t *testing.T) {
 	lock <- struct{}{}
 
 	<-done
+}
+
+func TestLogCompactConcurrentWrite(t *testing.T) {
+	type result struct {
+		writerID int
+		counter  uint64
+	}
+	writer := func(ctx context.Context, log *Log, writerID int) uint64 {
+		counter := uint64(0)
+		for {
+			select {
+			case <-ctx.Done():
+				return counter // cancel
+			default:
+				// pass
+			}
+			data := fmt.Sprintf("[%d]%d", writerID, counter)
+			if _, err := log.Write([]byte(data)); err != nil {
+				t.Fatalf("write failed: %d(%d)", writerID, counter)
+			}
+			counter += 1
+		}
+	}
+	writeAndResult := func(c context.Context, log *Log, writerID int, r chan result) {
+		counter := writer(c, log, writerID)
+		r <- result{writerID, counter}
+	}
+	compactAndLatency := func(log *Log, label string, i, max int) {
+		time.Sleep(100 * time.Millisecond)
+		e := time.Now()
+		if err := log.Compact(); err != nil {
+			t.Fatalf("no error: %+v", err)
+		}
+		t.Logf("[%s] %d item compact %d/%d (%s)", label, log.Len(), i, max, time.Since(e))
+	}
+
+	dir, err := os.MkdirTemp("", "waltest-*")
+	if err != nil {
+		t.Fatalf("no error: %+v", err)
+	}
+	t.Cleanup(func() {
+		os.RemoveAll(dir)
+	})
+
+	log, err := Open(dir)
+	if err != nil {
+		t.Fatalf("no error: %+v", err)
+	}
+	defer log.Close()
+
+	conc := 8
+	ch := make(chan result, conc)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	for i := 0; i < conc; i += 1 {
+		go writeAndResult(ctx, log, i, ch)
+	}
+
+	compactTest := 5
+	for i := 1; i <= compactTest; i += 1 {
+		compactAndLatency(log, "log-writing", i, compactTest)
+	}
+	cancel()
+	for i := 1; i <= compactTest; i += 1 {
+		compactAndLatency(log, "log-no-writing", i, compactTest)
+	}
+
+	results := make([]result, conc)
+	for i := 0; i < conc; i += 1 {
+		results[i] = <-ch
+	}
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].writerID < results[j].writerID
+	})
+	totalWritten := uint64(0)
+	for _, res := range results {
+		t.Logf("writer(%d) counter=%d", res.writerID, res.counter)
+		totalWritten += res.counter
+	}
+	if uint64(log.Len()) != totalWritten {
+		t.Errorf("log drop detected expect=%d actual=%d", totalWritten, log.Len())
+	}
 }
