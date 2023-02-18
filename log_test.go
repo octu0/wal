@@ -606,7 +606,7 @@ func TestLogOpen(t *testing.T) {
 		go func(w *sync.WaitGroup) {
 			defer w.Done()
 
-			if _, err := Open(dir); errors.Is(err, ErrLogLocked) != true {
+			if _, err := Open(dir); errors.Is(err, ErrLocked) != true {
 				t.Errorf("must locked error: %+v", err)
 			}
 		}(wg)
@@ -627,7 +627,7 @@ func TestLogOpen(t *testing.T) {
 		go func(w *sync.WaitGroup) {
 			defer w.Done()
 
-			if _, err := Open(dir); errors.Is(err, ErrLogLocked) != true {
+			if _, err := Open(dir); errors.Is(err, ErrLocked) != true {
 				t.Errorf("must locked error: %+v", err)
 			}
 		}(wg2)

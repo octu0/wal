@@ -2,7 +2,6 @@ package wal
 
 import (
 	"bufio"
-	"encoding/binary"
 	"io"
 	"os"
 	"path/filepath"
@@ -25,7 +24,6 @@ var (
 	ErrClosed         = errors.New("closed")
 	ErrCompactRunning = errors.New("compat already in progress")
 	ErrNotFound       = errors.New("not found")
-	ErrLogLocked      = errors.New("cloed")
 )
 
 type Index codec.ID
@@ -42,6 +40,7 @@ type Log struct {
 	lastPos        position
 	lastIndex      Index
 	indexes        map[Index]position
+	locker         Locker
 	wfile          *os.File
 	wbuf           *bufio.Writer
 	enc            *codec.Encoder
@@ -118,7 +117,7 @@ func (l *Log) closeLocked(removeLockFile bool) error {
 		return errors.WithStack(err)
 	}
 	if removeLockFile {
-		if err := os.Remove(filepath.Join(l.dir, walLockFileName)); err != nil {
+		if err := l.locker.Unlock(); err != nil {
 			return errors.WithStack(err)
 		}
 	}
@@ -274,7 +273,8 @@ func (l *Log) copyLatest() (*Log, position, error) {
 
 func (l *Log) copyLatestLocked() (*Log, position, error) {
 	prevPos := l.lastPos
-	newLog, err := openLog(l.dir, walTempFileName, WithSync(false), WithWriteBufferSize(l.opt.writeBufferSize))
+	nop := newNoopLocker()
+	newLog, err := openFileLog(nop, l.dir, walTempFileName, WithSync(false), WithWriteBufferSize(l.opt.writeBufferSize))
 	if err != nil {
 		return nil, position{}, errors.WithStack(err)
 	}
@@ -405,52 +405,23 @@ func Open(dir string, funcs ...OptionFunc) (*Log, error) {
 		return nil, errors.Errorf("%s is not directory", dir)
 	}
 
-	if err := tryLock(dir, walLockFileName); err != nil {
+	flock := NewFileLocker(filepath.Join(dir, walLockFileName))
+	if err := flock.TryLock(); err != nil {
 		return nil, errors.WithStack(err)
 	}
 
-	log, err := openLog(dir, walFileName, funcs...)
+	log, err := openFileLog(flock, dir, walFileName, funcs...)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
 	return log, nil
 }
 
-func tryLock(dir, name string) error {
-	path := filepath.Join(dir, name)
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, os.FileMode(0600))
-	if err != nil {
-		return errors.WithStack(err)
-	}
-	defer f.Close()
-
-	pid := os.Getpid()
-	pidBuf := make([]byte, 8)
-	if _, err := f.Read(pidBuf); err != nil {
-		if errors.Is(err, io.EOF) {
-			// empty, write locked pid
-			binary.BigEndian.PutUint64(pidBuf, uint64(pid))
-
-			if _, err := f.Write(pidBuf); err != nil {
-				return errors.WithStack(err)
-			}
-			if err := f.Sync(); err != nil {
-				return errors.WithStack(err)
-			}
-			return nil
-		}
-		return errors.WithStack(err)
-	}
-
-	lockedPid := binary.BigEndian.Uint64(pidBuf)
-	return errors.Wrapf(ErrLogLocked, "another process locked=%d", lockedPid)
-}
-
-func openLog(dir, name string, funcs ...OptionFunc) (*Log, error) {
+func openFileLog(locker Locker, dir, name string, funcs ...OptionFunc) (*Log, error) {
 	opt := newLogOpt(funcs...)
 
 	path := filepath.Join(dir, name)
-	lastPos, lastIndex, indexes, err := loadLog(path, opt)
+	lastPos, lastIndex, indexes, err := loadFileLog(path, opt)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
@@ -468,6 +439,7 @@ func openLog(dir, name string, funcs ...OptionFunc) (*Log, error) {
 		lastPos:     lastPos,
 		lastIndex:   lastIndex,
 		indexes:     indexes,
+		locker:      locker,
 		wfile:       wf,
 		wbuf:        wbuf,
 		enc:         enc,
@@ -493,7 +465,7 @@ func openRead(path string) (*mmap.ReaderAt, error) {
 	return f, nil
 }
 
-func loadLog(path string, opt *logOpt) (position, Index, map[Index]position, error) {
+func loadFileLog(path string, opt *logOpt) (position, Index, map[Index]position, error) {
 	stat, err := os.Stat(path)
 	if err != nil {
 		// no file
