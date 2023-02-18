@@ -2,7 +2,6 @@ package wal
 
 import (
 	"bufio"
-	"encoding/binary"
 	"io"
 	"os"
 	"path/filepath"
@@ -25,7 +24,6 @@ var (
 	ErrClosed         = errors.New("closed")
 	ErrCompactRunning = errors.New("compat already in progress")
 	ErrNotFound       = errors.New("not found")
-	ErrLogLocked      = errors.New("cloed")
 )
 
 type Index codec.ID
@@ -36,18 +34,20 @@ type position struct {
 }
 
 type Log struct {
-	mutex       *sync.RWMutex
-	opt         *logOpt
-	dir         string
-	lastPos     position
-	lastIndex   Index
-	indexes     map[Index]position
-	wfile       *os.File
-	wbuf        *bufio.Writer
-	enc         *codec.Encoder
-	reclaimable uint64
-	compacting  bool
-	closed      bool
+	mutex          *sync.RWMutex
+	opt            *logOpt
+	dir            string
+	lastPos        position
+	lastIndex      Index
+	indexes        map[Index]position
+	locker         Locker
+	wfile          *os.File
+	wbuf           *bufio.Writer
+	enc            *codec.Encoder
+	reclaimable    uint64
+	needCompaction bool
+	compacting     bool
+	closed         bool
 }
 
 func (l *Log) LastIndex() Index {
@@ -64,6 +64,13 @@ func (l *Log) ReclaimableSpace() uint64 {
 	return l.reclaimable
 }
 
+func (l *Log) NeedCompaction() bool {
+	l.mutex.RLock()
+	defer l.mutex.RUnlock()
+
+	return l.needCompaction
+}
+
 func (l *Log) Len() int {
 	l.mutex.RLock()
 	defer l.mutex.RUnlock()
@@ -77,6 +84,20 @@ func (l *Log) Close() error {
 
 	if err := l.closeLocked(true); err != nil {
 		return errors.WithStack(err)
+	}
+	if l.opt.closeCompaction {
+		if l.needCompaction {
+			newLog, _, err := l.copyLatestLocked()
+			if err != nil {
+				return errors.WithStack(err)
+			}
+			if err := newLog.closeLocked(false); err != nil {
+				return errors.WithStack(err)
+			}
+			if err := os.Rename(newLog.wfile.Name(), l.wfile.Name()); err != nil {
+				return errors.WithStack(err)
+			}
+		}
 	}
 	return nil
 }
@@ -96,7 +117,7 @@ func (l *Log) closeLocked(removeLockFile bool) error {
 		return errors.WithStack(err)
 	}
 	if removeLockFile {
-		if err := os.Remove(filepath.Join(l.dir, walLockFileName)); err != nil {
+		if err := l.locker.Unlock(); err != nil {
 			return errors.WithStack(err)
 		}
 	}
@@ -232,6 +253,7 @@ func (l *Log) Delete(idxs ...Index) error {
 		}
 	}
 	l.reclaimable = currReclaimable
+	l.needCompaction = true
 	return nil
 }
 
@@ -242,13 +264,19 @@ func (l *Log) compactRunning() bool {
 	return l.compacting
 }
 
-func (l *Log) copyLatest() (*Log, error) {
+func (l *Log) copyLatest() (*Log, position, error) {
 	l.mutex.RLock()
 	defer l.mutex.RUnlock()
 
-	newLog, err := openLog(l.dir, walTempFileName, WithSync(false), WithWriteBufferSize(l.opt.writeBufferSize))
+	return l.copyLatestLocked()
+}
+
+func (l *Log) copyLatestLocked() (*Log, position, error) {
+	prevPos := l.lastPos
+	nop := newNoopLocker()
+	newLog, err := openFileLog(nop, l.dir, walTempFileName, WithSync(false), WithWriteBufferSize(l.opt.writeBufferSize))
 	if err != nil {
-		return nil, errors.WithStack(err)
+		return nil, position{}, errors.WithStack(err)
 	}
 
 	// sequencial read (reduce seek)
@@ -265,17 +293,38 @@ func (l *Log) copyLatest() (*Log, error) {
 
 		data, err := l.decodeAtLocked(pos)
 		if err != nil {
-			return nil, errors.WithStack(err)
+			return nil, position{}, errors.WithStack(err)
 		}
 		if _, err := newLog.writeLocked(idx, data, false); err != nil {
-			return nil, errors.WithStack(err)
+			return nil, position{}, errors.WithStack(err)
 		}
 	}
 
-	if err := newLog.Close(); err != nil {
-		return nil, errors.WithStack(err)
+	return newLog, prevPos, nil
+}
+
+func (l *Log) copyBehindLocked(newLog *Log, prevPos position, targetPos position) error {
+	f, err := os.OpenFile(l.wfile.Name(), os.O_RDONLY, os.FileMode(0600))
+	if err != nil {
+		return errors.WithStack(err)
 	}
-	return newLog, nil
+	defer f.Close()
+
+	lim := io.NewSectionReader(f, int64(prevPos.offset+prevPos.size), int64(l.lastPos.offset+l.lastPos.size))
+	dec := codec.NewDecoder(lim)
+	for {
+		head, data, err := dec.Decode()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return errors.WithStack(err)
+		}
+		if _, err := newLog.writeLocked(Index(head.ID), data, false); err != nil {
+			return errors.WithStack(err)
+		}
+	}
+	return nil
 }
 
 func (l *Log) Compact() error {
@@ -302,7 +351,7 @@ func (l *Log) Compact() error {
 		return errors.WithStack(err)
 	}
 
-	newLog, err := l.copyLatest()
+	newLog, prevPos, err := l.copyLatest()
 	if err != nil {
 		return errors.WithStack(err)
 	}
@@ -311,6 +360,14 @@ func (l *Log) Compact() error {
 	defer l.mutex.Unlock()
 
 	if err := l.closeLocked(false); err != nil {
+		return errors.WithStack(err)
+	}
+	if prevPos.offset < l.lastPos.offset {
+		if err := l.copyBehindLocked(newLog, prevPos, l.lastPos); err != nil {
+			return errors.WithStack(err)
+		}
+	}
+	if err := newLog.closeLocked(false); err != nil {
 		return errors.WithStack(err)
 	}
 	if err := os.Rename(newLog.wfile.Name(), l.wfile.Name()); err != nil {
@@ -330,6 +387,7 @@ func (l *Log) Compact() error {
 	l.wfile = wf
 	l.enc = enc
 	l.reclaimable = 0
+	l.needCompaction = false
 	l.closed = false
 
 	if l.opt.compactFunc != nil {
@@ -347,52 +405,23 @@ func Open(dir string, funcs ...OptionFunc) (*Log, error) {
 		return nil, errors.Errorf("%s is not directory", dir)
 	}
 
-	if err := tryLock(dir, walLockFileName); err != nil {
+	flock := NewFileLocker(filepath.Join(dir, walLockFileName))
+	if err := flock.TryLock(); err != nil {
 		return nil, errors.WithStack(err)
 	}
 
-	log, err := openLog(dir, walFileName, funcs...)
+	log, err := openFileLog(flock, dir, walFileName, funcs...)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
 	return log, nil
 }
 
-func tryLock(dir, name string) error {
-	path := filepath.Join(dir, name)
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, os.FileMode(0600))
-	if err != nil {
-		return errors.WithStack(err)
-	}
-	defer f.Close()
-
-	pid := os.Getpid()
-	pidBuf := make([]byte, 8)
-	if _, err := f.Read(pidBuf); err != nil {
-		if errors.Is(err, io.EOF) {
-			// empty, write locked pid
-			binary.BigEndian.PutUint64(pidBuf, uint64(pid))
-
-			if _, err := f.Write(pidBuf); err != nil {
-				return errors.WithStack(err)
-			}
-			if err := f.Sync(); err != nil {
-				return errors.WithStack(err)
-			}
-			return nil
-		}
-		return errors.WithStack(err)
-	}
-
-	lockedPid := binary.BigEndian.Uint64(pidBuf)
-	return errors.Wrapf(ErrLogLocked, "another process locked=%d", lockedPid)
-}
-
-func openLog(dir, name string, funcs ...OptionFunc) (*Log, error) {
+func openFileLog(locker Locker, dir, name string, funcs ...OptionFunc) (*Log, error) {
 	opt := newLogOpt(funcs...)
 
 	path := filepath.Join(dir, name)
-	lastPos, lastIndex, indexes, err := loadLog(path, opt)
+	lastPos, lastIndex, indexes, err := loadFileLog(path, opt)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
@@ -410,6 +439,7 @@ func openLog(dir, name string, funcs ...OptionFunc) (*Log, error) {
 		lastPos:     lastPos,
 		lastIndex:   lastIndex,
 		indexes:     indexes,
+		locker:      locker,
 		wfile:       wf,
 		wbuf:        wbuf,
 		enc:         enc,
@@ -435,7 +465,7 @@ func openRead(path string) (*mmap.ReaderAt, error) {
 	return f, nil
 }
 
-func loadLog(path string, opt *logOpt) (position, Index, map[Index]position, error) {
+func loadFileLog(path string, opt *logOpt) (position, Index, map[Index]position, error) {
 	stat, err := os.Stat(path)
 	if err != nil {
 		// no file
@@ -445,7 +475,7 @@ func loadLog(path string, opt *logOpt) (position, Index, map[Index]position, err
 		return position{}, Index(0), nil, errors.Errorf("%s is directory", path)
 	}
 
-	f, err := os.OpenFile(path, os.O_RDONLY, 0)
+	f, err := os.OpenFile(path, os.O_RDONLY, os.FileMode(0600))
 	if err != nil {
 		return position{}, Index(0), nil, errors.WithStack(err)
 	}

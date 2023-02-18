@@ -2,10 +2,13 @@ package wal
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
+	"sort"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/pkg/errors"
 
@@ -48,7 +51,7 @@ func Example() {
 	// data3
 }
 
-func TestLog(t *testing.T) {
+func TestLogBasicOP(t *testing.T) {
 	t.Run("Write/Len/Read", func(tt *testing.T) {
 		dir, err := os.MkdirTemp("", "waltest-*")
 		if err != nil {
@@ -260,6 +263,7 @@ func TestLog(t *testing.T) {
 			tt.Errorf("actual data=%s", data2)
 		}
 	})
+
 	t.Run("Close/Read/Write", func(tt *testing.T) {
 		dir, err := os.MkdirTemp("", "waltest-*")
 		if err != nil {
@@ -310,6 +314,7 @@ func TestLog(t *testing.T) {
 			tt.Errorf("actual err=%+v", err)
 		}
 	})
+
 	t.Run("Compact/Read/Write", func(tt *testing.T) {
 		dir, err := os.MkdirTemp("", "waltest-*")
 		if err != nil {
@@ -386,6 +391,199 @@ func TestLog(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("Reopen/CloseCompaction=false", func(tt *testing.T) {
+		dir, err := os.MkdirTemp("", "waltest-*")
+		if err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		tt.Cleanup(func() {
+			os.RemoveAll(dir)
+		})
+
+		prev, err := Open(dir, WithCloseCompaction(false))
+		if err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		id1, err := prev.Write([]byte("test1"))
+		if err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		id2, err := prev.Write([]byte("test2"))
+		if err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		id3, err := prev.Write([]byte("test3"))
+		if err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		id4, err := prev.Write([]byte("t4"))
+		if err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		id5, err := prev.Write([]byte("ttttt5"))
+		if err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+
+		if err := prev.Delete(id2, id3, id5); err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		prevLen := prev.Len()
+		if prevLen != 2 {
+			tt.Errorf("memory delete 3 ids actual=%d", prevLen)
+		}
+		if err := prev.Close(); err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+
+		newLog, err := Open(dir, WithCloseCompaction(false))
+		if err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		newLen := newLog.Len()
+		if newLen != 5 {
+			tt.Errorf("Logs are left that should vanish because no Compact() before Close().")
+		}
+		for _, id := range []Index{id1, id2, id3, id4, id5} {
+			_, err := newLog.Read(id)
+			if err != nil {
+				tt.Errorf("id %d is not deleted(not yet Compact): %+v", id, err)
+			}
+		}
+		if err := newLog.Compact(); err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		newLen2 := newLog.Len()
+		if newLen != newLen2 {
+			tt.Errorf("no compact logs")
+		}
+
+		if err := newLog.Delete(id2, id3, id5); err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		if err := newLog.Compact(); err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		newLen3 := newLog.Len()
+		if newLen3 != 2 {
+			tt.Errorf("3 logs deleted actual=%d", newLen3)
+		}
+		if err := newLog.Close(); err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+
+		lastLog, err := Open(dir, WithCloseCompaction(false))
+		if err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		lastLogLen := lastLog.Len()
+		if lastLogLen != 2 {
+			tt.Errorf("compated log open actual=%d", lastLogLen)
+		}
+		data1, err := lastLog.Read(id1)
+		if err != nil {
+			tt.Errorf("no error: %+v", err)
+		}
+		if bytes.Equal(data1, []byte("test1")) != true {
+			tt.Errorf("actual=%s", data1)
+		}
+		data4, err := lastLog.Read(id4)
+		if err != nil {
+			tt.Errorf("no error: %+v", err)
+		}
+		if bytes.Equal(data4, []byte("t4")) != true {
+			tt.Errorf("actual=%s", data4)
+		}
+
+		for _, id := range []Index{id2, id3, id5} {
+			_, err := lastLog.Read(id)
+			if errors.Is(err, ErrNotFound) != true {
+				tt.Errorf("deleted log %d: %+v", id, err)
+			}
+		}
+		if err := lastLog.Close(); err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+	})
+	t.Run("Reopen/CloseCompaction=default", func(tt *testing.T) {
+		dir, err := os.MkdirTemp("", "waltest-*")
+		if err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		tt.Cleanup(func() {
+			os.RemoveAll(dir)
+		})
+
+		prev, err := Open(dir)
+		if err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		id1, err := prev.Write([]byte("test1"))
+		if err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		id2, err := prev.Write([]byte("test2"))
+		if err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		id3, err := prev.Write([]byte("test3"))
+		if err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		id4, err := prev.Write([]byte("t4"))
+		if err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		id5, err := prev.Write([]byte("ttttt5"))
+		if err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+
+		if err := prev.Delete(id2, id3, id5); err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		prevLen := prev.Len()
+		if prevLen != 2 {
+			tt.Errorf("memory delete 3 ids actual=%d", prevLen)
+		}
+		if err := prev.Close(); err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+
+		lastLog, err := Open(dir)
+		if err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		lastLogLen := lastLog.Len()
+		if lastLogLen != 2 {
+			tt.Errorf("compated log open actual=%d", lastLogLen)
+		}
+		data1, err := lastLog.Read(id1)
+		if err != nil {
+			tt.Errorf("no error: %+v", err)
+		}
+		if bytes.Equal(data1, []byte("test1")) != true {
+			tt.Errorf("actual=%s", data1)
+		}
+		data4, err := lastLog.Read(id4)
+		if err != nil {
+			tt.Errorf("no error: %+v", err)
+		}
+		if bytes.Equal(data4, []byte("t4")) != true {
+			tt.Errorf("actual=%s", data4)
+		}
+
+		for _, id := range []Index{id2, id3, id5} {
+			_, err := lastLog.Read(id)
+			if errors.Is(err, ErrNotFound) != true {
+				tt.Errorf("deleted log %d: %+v", id, err)
+			}
+		}
+		if err := lastLog.Close(); err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+	})
 }
 
 func TestLogOpen(t *testing.T) {
@@ -408,7 +606,7 @@ func TestLogOpen(t *testing.T) {
 		go func(w *sync.WaitGroup) {
 			defer w.Done()
 
-			if _, err := Open(dir); errors.Is(err, ErrLogLocked) != true {
+			if _, err := Open(dir); errors.Is(err, ErrLocked) != true {
 				t.Errorf("must locked error: %+v", err)
 			}
 		}(wg)
@@ -429,7 +627,7 @@ func TestLogOpen(t *testing.T) {
 		go func(w *sync.WaitGroup) {
 			defer w.Done()
 
-			if _, err := Open(dir); errors.Is(err, ErrLogLocked) != true {
+			if _, err := Open(dir); errors.Is(err, ErrLocked) != true {
 				t.Errorf("must locked error: %+v", err)
 			}
 		}(wg2)
@@ -504,4 +702,86 @@ func TestLogCompact(t *testing.T) {
 	lock <- struct{}{}
 
 	<-done
+}
+
+func TestLogCompactConcurrentWrite(t *testing.T) {
+	type result struct {
+		writerID int
+		counter  uint64
+	}
+	writer := func(ctx context.Context, log *Log, writerID int) uint64 {
+		counter := uint64(0)
+		for {
+			select {
+			case <-ctx.Done():
+				return counter // cancel
+			default:
+				// pass
+			}
+			data := fmt.Sprintf("[%d]%d", writerID, counter)
+			if _, err := log.Write([]byte(data)); err != nil {
+				t.Fatalf("write failed: %d(%d)", writerID, counter)
+			}
+			counter += 1
+		}
+	}
+	writeAndResult := func(c context.Context, log *Log, writerID int, r chan result) {
+		counter := writer(c, log, writerID)
+		r <- result{writerID, counter}
+	}
+	compactAndLatency := func(log *Log, label string, i, max int) {
+		time.Sleep(100 * time.Millisecond)
+		e := time.Now()
+		if err := log.Compact(); err != nil {
+			t.Fatalf("no error: %+v", err)
+		}
+		t.Logf("[%s] %d item compact %d/%d (%s)", label, log.Len(), i, max, time.Since(e))
+	}
+
+	dir, err := os.MkdirTemp("", "waltest-*")
+	if err != nil {
+		t.Fatalf("no error: %+v", err)
+	}
+	t.Cleanup(func() {
+		os.RemoveAll(dir)
+	})
+
+	log, err := Open(dir)
+	if err != nil {
+		t.Fatalf("no error: %+v", err)
+	}
+	defer log.Close()
+
+	conc := 8
+	ch := make(chan result, conc)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	for i := 0; i < conc; i += 1 {
+		go writeAndResult(ctx, log, i, ch)
+	}
+
+	compactTest := 5
+	for i := 1; i <= compactTest; i += 1 {
+		compactAndLatency(log, "log-writing", i, compactTest)
+	}
+	cancel()
+	for i := 1; i <= compactTest; i += 1 {
+		compactAndLatency(log, "log-no-writing", i, compactTest)
+	}
+
+	results := make([]result, conc)
+	for i := 0; i < conc; i += 1 {
+		results[i] = <-ch
+	}
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].writerID < results[j].writerID
+	})
+	totalWritten := uint64(0)
+	for _, res := range results {
+		t.Logf("writer(%d) counter=%d", res.writerID, res.counter)
+		totalWritten += res.counter
+	}
+	if uint64(log.Len()) != totalWritten {
+		t.Errorf("log drop detected expect=%d actual=%d", totalWritten, log.Len())
+	}
 }
