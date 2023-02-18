@@ -36,18 +36,19 @@ type position struct {
 }
 
 type Log struct {
-	mutex       *sync.RWMutex
-	opt         *logOpt
-	dir         string
-	lastPos     position
-	lastIndex   Index
-	indexes     map[Index]position
-	wfile       *os.File
-	wbuf        *bufio.Writer
-	enc         *codec.Encoder
-	reclaimable uint64
-	compacting  bool
-	closed      bool
+	mutex          *sync.RWMutex
+	opt            *logOpt
+	dir            string
+	lastPos        position
+	lastIndex      Index
+	indexes        map[Index]position
+	wfile          *os.File
+	wbuf           *bufio.Writer
+	enc            *codec.Encoder
+	reclaimable    uint64
+	needCompaction bool
+	compacting     bool
+	closed         bool
 }
 
 func (l *Log) LastIndex() Index {
@@ -64,6 +65,13 @@ func (l *Log) ReclaimableSpace() uint64 {
 	return l.reclaimable
 }
 
+func (l *Log) NeedCompaction() bool {
+	l.mutex.RLock()
+	defer l.mutex.RUnlock()
+
+	return l.needCompaction
+}
+
 func (l *Log) Len() int {
 	l.mutex.RLock()
 	defer l.mutex.RUnlock()
@@ -77,6 +85,20 @@ func (l *Log) Close() error {
 
 	if err := l.closeLocked(true); err != nil {
 		return errors.WithStack(err)
+	}
+	if l.opt.closeCompaction {
+		if l.needCompaction {
+			newLog, _, err := l.copyLatestLocked()
+			if err != nil {
+				return errors.WithStack(err)
+			}
+			if err := newLog.closeLocked(false); err != nil {
+				return errors.WithStack(err)
+			}
+			if err := os.Rename(newLog.wfile.Name(), l.wfile.Name()); err != nil {
+				return errors.WithStack(err)
+			}
+		}
 	}
 	return nil
 }
@@ -232,6 +254,7 @@ func (l *Log) Delete(idxs ...Index) error {
 		}
 	}
 	l.reclaimable = currReclaimable
+	l.needCompaction = true
 	return nil
 }
 
@@ -246,6 +269,10 @@ func (l *Log) copyLatest() (*Log, position, error) {
 	l.mutex.RLock()
 	defer l.mutex.RUnlock()
 
+	return l.copyLatestLocked()
+}
+
+func (l *Log) copyLatestLocked() (*Log, position, error) {
 	prevPos := l.lastPos
 	newLog, err := openLog(l.dir, walTempFileName, WithSync(false), WithWriteBufferSize(l.opt.writeBufferSize))
 	if err != nil {
@@ -360,6 +387,7 @@ func (l *Log) Compact() error {
 	l.wfile = wf
 	l.enc = enc
 	l.reclaimable = 0
+	l.needCompaction = false
 	l.closed = false
 
 	if l.opt.compactFunc != nil {
