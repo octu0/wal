@@ -475,7 +475,7 @@ func loadLog(path string, opt *logOpt) (position, Index, map[Index]position, err
 		return position{}, Index(0), nil, errors.Errorf("%s is directory", path)
 	}
 
-	f, err := os.OpenFile(path, os.O_RDONLY, 0)
+	f, err := os.OpenFile(path, os.O_RDONLY, os.FileMode(0600))
 	if err != nil {
 		return position{}, Index(0), nil, errors.WithStack(err)
 	}
