@@ -33,6 +33,12 @@ type position struct {
 	size   int
 }
 
+// implements
+var (
+	_ io.WriterTo   = (*Log)(nil)
+	_ io.ReaderFrom = (*Log)(nil)
+)
+
 type Log struct {
 	mutex          *sync.RWMutex
 	opt            *logOpt
@@ -280,15 +286,15 @@ func (l *Log) copyLatestLocked() (*Log, position, error) {
 	}
 
 	// sequencial read (reduce seek)
-	indexes := make([]Index, 0, len(l.indexes))
+	list := make([]Index, 0, len(l.indexes))
 	for idx, _ := range l.indexes {
-		indexes = append(indexes, idx)
+		list = append(list, idx)
 	}
-	sort.Slice(indexes, func(i, j int) bool {
-		return indexes[i] < indexes[j]
+	sort.Slice(list, func(i, j int) bool {
+		return list[i] < list[j]
 	})
 
-	for _, idx := range indexes {
+	for _, idx := range list {
 		pos := l.indexes[idx]
 
 		data, err := l.decodeAtLocked(pos)
@@ -396,6 +402,67 @@ func (l *Log) Compact() error {
 	return nil
 }
 
+func (l *Log) WriteTo(w io.Writer) (int64, error) {
+	l.mutex.RLock()
+	defer l.mutex.RUnlock()
+
+	// sequencial read (reduce seek)
+	list := make([]Index, 0, len(l.indexes))
+	for idx, _ := range l.indexes {
+		list = append(list, idx)
+	}
+	sort.Slice(list, func(i, j int) bool {
+		return list[i] < list[j]
+	})
+
+	enc := codec.NewEncoder(w)
+	written := int64(0)
+	for _, idx := range list {
+		pos := l.indexes[idx]
+
+		data, err := l.decodeAtLocked(pos)
+		if err != nil {
+			return 0, errors.WithStack(err)
+		}
+		size, err := enc.Encode(codec.ID(idx), data)
+		if err != nil {
+			return 0, errors.WithStack(err)
+		}
+		written += int64(size)
+	}
+	return written, nil
+}
+
+func (l *Log) ReadFrom(r io.Reader) (int64, error) {
+	l.mutex.Lock()
+	defer l.mutex.Unlock()
+
+	dec := codec.NewDecoder(r)
+	readed := int64(0)
+	for {
+		head, data, err := dec.Decode()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return 0, errors.WithStack(err)
+		}
+		if _, err := l.writeLocked(Index(head.ID), data, false); err != nil {
+			return 0, errors.WithStack(err)
+		}
+		readed += int64(codec.HeaderSize() + len(data))
+	}
+	if err := l.wbuf.Flush(); err != nil {
+		return 0, errors.WithStack(err)
+	}
+	if l.opt.sync {
+		if err := l.wfile.Sync(); err != nil {
+			return 0, errors.WithStack(err)
+		}
+	}
+	return readed, nil
+}
+
 func Open(dir string, funcs ...OptionFunc) (*Log, error) {
 	stat, err := os.Stat(dir)
 	if err != nil {
@@ -421,7 +488,7 @@ func openFileLog(locker Locker, dir, name string, funcs ...OptionFunc) (*Log, er
 	opt := newLogOpt(funcs...)
 
 	path := filepath.Join(dir, name)
-	lastPos, lastIndex, indexes, err := loadFileLog(path, opt)
+	lastPos, lastIndex, indexes, err := loadFileLogHeader(path, opt)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
@@ -465,7 +532,7 @@ func openRead(path string) (*mmap.ReaderAt, error) {
 	return f, nil
 }
 
-func loadFileLog(path string, opt *logOpt) (position, Index, map[Index]position, error) {
+func loadFileLogHeader(path string, opt *logOpt) (position, Index, map[Index]position, error) {
 	stat, err := os.Stat(path)
 	if err != nil {
 		// no file
