@@ -506,6 +506,7 @@ func TestLogBasicOP(t *testing.T) {
 			tt.Fatalf("no error: %+v", err)
 		}
 	})
+
 	t.Run("Reopen/CloseCompaction=default", func(tt *testing.T) {
 		dir, err := os.MkdirTemp("", "waltest-*")
 		if err != nil {
@@ -582,6 +583,93 @@ func TestLogBasicOP(t *testing.T) {
 		}
 		if err := lastLog.Close(); err != nil {
 			tt.Fatalf("no error: %+v", err)
+		}
+	})
+
+	t.Run("WriteTo/ReadFrom", func(tt *testing.T) {
+		dir, err := os.MkdirTemp("", "waltest-*")
+		if err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		tt.Cleanup(func() {
+			os.RemoveAll(dir)
+		})
+
+		log, err := Open(dir)
+		if err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		defer log.Close()
+
+		id1, err := log.Write([]byte("test1"))
+		if err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		id2, err := log.Write([]byte("test2"))
+		if err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		id3, err := log.Write([]byte("test3"))
+		if err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		if err := log.Delete(id1); err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+
+		buf := bytes.NewBuffer(nil)
+		size, err := log.WriteTo(buf)
+		if err != nil {
+			tt.Errorf("no error: %+v", err)
+		}
+		// n := 0
+		// n += head(16) + test2
+		// n += head(16) + test3
+		// => n is 42
+		if size != 42 {
+			tt.Errorf("written 42 byte actual=%d", size)
+		}
+		if buf.Len() != 42 {
+			tt.Errorf("actual bytes len 42 actual=%d", buf.Len())
+		}
+
+		dir2, err := os.MkdirTemp("", "waltest-*")
+		if err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		tt.Cleanup(func() {
+			os.RemoveAll(dir2)
+		})
+
+		log2, err := Open(dir2)
+		if err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		defer log2.Close()
+
+		size2, err := log2.ReadFrom(bytes.NewReader(buf.Bytes()))
+		if err != nil {
+			tt.Errorf("no error: %+v", err)
+		}
+		if size2 != 42 {
+			tt.Errorf("42 bytes readed actual=%d", size2)
+		}
+		if _, err := log2.Read(id1); errors.Is(err, ErrNotFound) != true {
+			tt.Errorf("deleted id1: %+v", err)
+		}
+		data2, err := log2.Read(id2)
+		if err != nil {
+			tt.Errorf("no error: %+v", err)
+		}
+		if bytes.Equal(data2, []byte("test2")) != true {
+			tt.Errorf("id2 is test2 actual=%s", data2)
+		}
+		data3, err := log2.Read(id3)
+		if err != nil {
+			tt.Errorf("no error: %+v", err)
+		}
+		if bytes.Equal(data3, []byte("test3")) != true {
+			tt.Errorf("id3 is test3 actual=%s", data3)
 		}
 	})
 }
