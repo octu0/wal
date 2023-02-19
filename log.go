@@ -33,6 +33,8 @@ type position struct {
 	size   int
 }
 
+type DataLoadFunc func(Index, []byte)
+
 // implements
 var (
 	_ io.WriterTo   = (*Log)(nil)
@@ -450,6 +452,9 @@ func (l *Log) ReadFrom(r io.Reader) (int64, error) {
 		if _, err := l.writeLocked(Index(head.ID), data, false); err != nil {
 			return 0, errors.WithStack(err)
 		}
+		if l.opt.dataloadFunc != nil {
+			l.opt.dataloadFunc(Index(head.ID), data)
+		}
 		readed += int64(codec.HeaderSize() + len(data))
 	}
 	if err := l.wbuf.Flush(); err != nil {
@@ -488,7 +493,7 @@ func openFileLog(locker Locker, dir, name string, funcs ...OptionFunc) (*Log, er
 	opt := newLogOpt(funcs...)
 
 	path := filepath.Join(dir, name)
-	lastPos, lastIndex, indexes, err := loadFileLogHeader(path, opt)
+	lastPos, lastIndex, indexes, err := loadFileLog(path, opt)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
@@ -532,7 +537,7 @@ func openRead(path string) (*mmap.ReaderAt, error) {
 	return f, nil
 }
 
-func loadFileLogHeader(path string, opt *logOpt) (position, Index, map[Index]position, error) {
+func loadFileLog(path string, opt *logOpt) (position, Index, map[Index]position, error) {
 	stat, err := os.Stat(path)
 	if err != nil {
 		// no file
@@ -553,7 +558,15 @@ func loadFileLogHeader(path string, opt *logOpt) (position, Index, map[Index]pos
 	indexes := make(map[Index]position, 64)
 	dec := codec.NewDecoder(f)
 	for {
-		head, err := dec.DecodeHeader()
+		var head codec.Header
+		var data []byte
+		var err error
+
+		if opt.dataloadFunc != nil {
+			head, data, err = dec.Decode()
+		} else {
+			head, err = dec.DecodeHeader()
+		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				break
@@ -567,6 +580,9 @@ func loadFileLogHeader(path string, opt *logOpt) (position, Index, map[Index]pos
 		lastPos = newPos
 		lastIndex = Index(head.ID) + 1
 		indexes[Index(head.ID)] = newPos
+		if opt.dataloadFunc != nil {
+			opt.dataloadFunc(Index(head.ID), data)
+		}
 	}
 	return lastPos, lastIndex, indexes, nil
 }
