@@ -12,6 +12,7 @@ type logOpt struct {
 	sync            bool
 	closeCompaction bool
 	writeBufferSize int
+	dataloadFunc    DataLoadFunc
 	compactFunc     func() // for testing
 }
 
@@ -33,11 +34,18 @@ func WithWriteBufferSize(size int) OptionFunc {
 	}
 }
 
+func WithDataLoadFunc(fn DataLoadFunc) OptionFunc {
+	return func(opt *logOpt) {
+		opt.dataloadFunc = fn
+	}
+}
+
 func newLogOpt(funcs ...OptionFunc) *logOpt {
 	opt := &logOpt{
 		sync:            defaultSyncMode,
 		closeCompaction: defaultCloseCompaction,
 		writeBufferSize: defaultWriteBufferSize,
+		dataloadFunc:    nil,
 		compactFunc:     nil,
 	}
 	for _, fn := range funcs {
