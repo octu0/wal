@@ -683,7 +683,7 @@ func TestLogBasicOP(t *testing.T) {
 		})
 
 		dataloadCalled := 0
-		log, err := Open(dir, WithDataLoadFunc(func(Index, []byte) {
+		log, err := Open(dir, WithDataLoadFunc(func(Index) {
 			dataloadCalled += 1
 		}))
 		if err != nil {
@@ -722,29 +722,20 @@ func TestLogBasicOP(t *testing.T) {
 		log.Close()
 
 		log1DataLoaded := 0
-		log1, err := Open(dir, WithDataLoadFunc(func(loadID Index, data []byte) {
+		log1, err := Open(dir, WithDataLoadFunc(func(loadID Index) {
 			if log1DataLoaded == 0 {
 				if loadID != id1 {
 					tt.Errorf("call0 id is id1 actual=%d", loadID)
-				}
-				if bytes.Equal(data, []byte("test1")) != true {
-					tt.Errorf("call0 data is test1 actual=%s", data)
 				}
 			}
 			if log1DataLoaded == 1 {
 				if loadID != id2 {
 					tt.Errorf("call1 id is id2 actual=%d", loadID)
 				}
-				if bytes.Equal(data, []byte("test2")) != true {
-					tt.Errorf("call1 data is test2 actual=%s", data)
-				}
 			}
 			if log1DataLoaded == 2 {
 				if loadID != id3 {
 					tt.Errorf("call2 id is id3 actual=%d", loadID)
-				}
-				if bytes.Equal(data, []byte("test3")) != true {
-					tt.Errorf("call2 data is test3 actual=%s", data)
 				}
 			}
 			log1DataLoaded += 1
@@ -758,29 +749,20 @@ func TestLogBasicOP(t *testing.T) {
 		defer log1.Close()
 
 		log2DataLoaded := 0
-		log2, err := Open(dir2, WithDataLoadFunc(func(loadID Index, data []byte) {
+		log2, err := Open(dir2, WithDataLoadFunc(func(loadID Index) {
 			if log2DataLoaded == 0 {
 				if loadID != id1 {
 					tt.Errorf("call0 id is id1 actual=%d", loadID)
-				}
-				if bytes.Equal(data, []byte("test1")) != true {
-					tt.Errorf("call0 data is test1 actual=%s", data)
 				}
 			}
 			if log2DataLoaded == 1 {
 				if loadID != id2 {
 					tt.Errorf("call1 id is id2 actual=%d", loadID)
 				}
-				if bytes.Equal(data, []byte("test2")) != true {
-					tt.Errorf("call1 data is test2 actual=%s", data)
-				}
 			}
 			if log2DataLoaded == 2 {
 				if loadID != id3 {
 					tt.Errorf("call2 id is id3 actual=%d", loadID)
-				}
-				if bytes.Equal(data, []byte("test3")) != true {
-					tt.Errorf("call2 data is test3 actual=%s", data)
 				}
 			}
 			log2DataLoaded += 1
