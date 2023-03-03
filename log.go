@@ -33,7 +33,7 @@ type position struct {
 	size   int
 }
 
-type DataLoadFunc func(Index)
+type DataLoadFunc func(Index, []byte) error
 
 // implements
 var (
@@ -453,7 +453,9 @@ func (l *Log) ReadFrom(r io.Reader) (int64, error) {
 			return 0, errors.WithStack(err)
 		}
 		if l.opt.dataloadFunc != nil {
-			l.opt.dataloadFunc(Index(head.ID))
+			if err := l.opt.dataloadFunc(Index(head.ID), data); err != nil {
+				return 0, errors.WithStack(err)
+			}
 		}
 		readed += int64(codec.HeaderSize() + len(data))
 	}
@@ -558,7 +560,15 @@ func loadFileLog(path string, opt *logOpt) (position, Index, map[Index]position,
 	indexes := make(map[Index]position, 64)
 	dec := codec.NewDecoder(f)
 	for {
-		head, err := dec.DecodeHeader()
+		var head codec.Header
+		var data []byte
+		var err error
+
+		if opt.dataloadFunc != nil {
+			head, data, err = dec.Decode()
+		} else {
+			head, err = dec.DecodeHeader()
+		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				break
@@ -573,7 +583,9 @@ func loadFileLog(path string, opt *logOpt) (position, Index, map[Index]position,
 		lastIndex = Index(head.ID) + 1
 		indexes[Index(head.ID)] = newPos
 		if opt.dataloadFunc != nil {
-			opt.dataloadFunc(Index(head.ID))
+			if err := opt.dataloadFunc(Index(head.ID), data); err != nil {
+				return position{}, Index(0), nil, errors.WithStack(err)
+			}
 		}
 	}
 	return lastPos, lastIndex, indexes, nil
