@@ -2,5 +2,5 @@ package wal
 
 const (
 	AppName string = "wal"
-	Version string = "1.0.5"
+	Version string = "1.0.6"
 )

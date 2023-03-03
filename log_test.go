@@ -683,8 +683,9 @@ func TestLogBasicOP(t *testing.T) {
 		})
 
 		dataloadCalled := 0
-		log, err := Open(dir, WithDataLoadFunc(func(Index) {
+		log, err := Open(dir, WithDataLoadFunc(func(Index, []byte) error {
 			dataloadCalled += 1
+			return nil
 		}))
 		if err != nil {
 			tt.Fatalf("no error: %+v", err)
@@ -722,23 +723,33 @@ func TestLogBasicOP(t *testing.T) {
 		log.Close()
 
 		log1DataLoaded := 0
-		log1, err := Open(dir, WithDataLoadFunc(func(loadID Index) {
+		log1, err := Open(dir, WithDataLoadFunc(func(loadID Index, data []byte) error {
 			if log1DataLoaded == 0 {
 				if loadID != id1 {
 					tt.Errorf("call0 id is id1 actual=%d", loadID)
+				}
+				if bytes.Equal(data, []byte("test1")) != true {
+					tt.Errorf("call0 data is test1 actual=%s", data)
 				}
 			}
 			if log1DataLoaded == 1 {
 				if loadID != id2 {
 					tt.Errorf("call1 id is id2 actual=%d", loadID)
 				}
+				if bytes.Equal(data, []byte("test2")) != true {
+					tt.Errorf("call1 data is test2 actual=%s", data)
+				}
 			}
 			if log1DataLoaded == 2 {
 				if loadID != id3 {
 					tt.Errorf("call2 id is id3 actual=%d", loadID)
 				}
+				if bytes.Equal(data, []byte("test3")) != true {
+					tt.Errorf("call2 data is test3 actual=%s", data)
+				}
 			}
 			log1DataLoaded += 1
+			return nil
 		}))
 		if err != nil {
 			tt.Fatalf("no error: %+v", err)
@@ -749,23 +760,33 @@ func TestLogBasicOP(t *testing.T) {
 		defer log1.Close()
 
 		log2DataLoaded := 0
-		log2, err := Open(dir2, WithDataLoadFunc(func(loadID Index) {
+		log2, err := Open(dir2, WithDataLoadFunc(func(loadID Index, data []byte) error {
 			if log2DataLoaded == 0 {
 				if loadID != id1 {
 					tt.Errorf("call0 id is id1 actual=%d", loadID)
+				}
+				if bytes.Equal(data, []byte("test1")) != true {
+					tt.Errorf("call0 data is test1 actual=%s", data)
 				}
 			}
 			if log2DataLoaded == 1 {
 				if loadID != id2 {
 					tt.Errorf("call1 id is id2 actual=%d", loadID)
 				}
+				if bytes.Equal(data, []byte("test2")) != true {
+					tt.Errorf("call1 data is test2 actual=%s", data)
+				}
 			}
 			if log2DataLoaded == 2 {
 				if loadID != id3 {
 					tt.Errorf("call2 id is id3 actual=%d", loadID)
 				}
+				if bytes.Equal(data, []byte("test3")) != true {
+					tt.Errorf("call2 data is test3 actual=%s", data)
+				}
 			}
 			log2DataLoaded += 1
+			return nil
 		}))
 		if err != nil {
 			tt.Fatalf("no error: %+v", err)
@@ -777,6 +798,36 @@ func TestLogBasicOP(t *testing.T) {
 			tt.Errorf("called at ReadFrom() actual=%d", log2DataLoaded)
 		}
 		defer log2.Close()
+	})
+	t.Run("DataLoadFuncError", func(tt *testing.T) {
+		dir, err := os.MkdirTemp("", "waltest-*")
+		if err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		tt.Cleanup(func() {
+			os.RemoveAll(dir)
+		})
+		log, err := Open(dir)
+		if err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+
+		if _, err := log.Write([]byte("test1")); err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		if _, err := log.Write([]byte("testtest2")); err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+		if err := log.Close(); err != nil {
+			tt.Fatalf("no error: %+v", err)
+		}
+
+		errDataloadFuncInternal := errors.New("internal error")
+		if _, err := Open(dir, WithDataLoadFunc(func(Index, []byte) error {
+			return errDataloadFuncInternal
+		})); errors.Is(err, errDataloadFuncInternal) != true {
+			tt.Errorf("must internal error: %+v", err)
+		}
 	})
 }
 
