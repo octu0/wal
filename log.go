@@ -84,6 +84,13 @@ func (l *Log) Len() int {
 	return l.indexes.Len()
 }
 
+func (l *Log) Segments() int {
+	l.mutex.RLock()
+	defer l.mutex.RUnlock()
+
+	return len(l.segments)
+}
+
 func (l *Log) Close() error {
 	l.mutex.Lock()
 	defer l.mutex.Unlock()
@@ -187,6 +194,12 @@ func (l *Log) writeAtLocked(idx Index, data []byte) error {
 		return errors.WithStack(err)
 	}
 	l.indexes.Set(idx, fileID)
+
+	if l.opt.maxSegmentSize < l.currentSegment.Size() {
+		if err := l.rotateSegmentLocked(); err != nil {
+			return errors.WithStack(err)
+		}
+	}
 	return nil
 }
 

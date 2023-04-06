@@ -1,9 +1,10 @@
 package wal
 
 const (
-	defaultSyncMode        bool = false
-	defaultCloseCompaction bool = true
-	defaultWriteBufferSize int  = 32 * 1024
+	defaultSyncMode        bool   = false
+	defaultCloseCompaction bool   = true
+	defaultWriteBufferSize int    = 32 * 1024
+	defaultMaxSegmentSize  uint64 = 100 * 1024 * 1024
 )
 
 type OptionFunc func(*logOpt)
@@ -12,6 +13,7 @@ type logOpt struct {
 	sync            bool
 	closeCompaction bool
 	writeBufferSize int
+	maxSegmentSize  uint64
 	dataloadFunc    DataLoadFunc
 	compactFunc     func() // for testing
 }
@@ -34,6 +36,12 @@ func WithWriteBufferSize(size int) OptionFunc {
 	}
 }
 
+func WithMaxSegmentSize(size uint64) OptionFunc {
+	return func(opt *logOpt) {
+		opt.maxSegmentSize = size
+	}
+}
+
 func WithDataLoadFunc(fn DataLoadFunc) OptionFunc {
 	return func(opt *logOpt) {
 		opt.dataloadFunc = fn
@@ -45,6 +53,7 @@ func newLogOpt(funcs ...OptionFunc) *logOpt {
 		sync:            defaultSyncMode,
 		closeCompaction: defaultCloseCompaction,
 		writeBufferSize: defaultWriteBufferSize,
+		maxSegmentSize:  defaultMaxSegmentSize,
 		dataloadFunc:    nil,
 		compactFunc:     nil,
 	}
