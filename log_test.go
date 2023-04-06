@@ -278,19 +278,21 @@ func TestLogBasicOP(t *testing.T) {
 			tt.Fatalf("no error: %+v", err)
 		}
 
-		if _, err := log.Write([]byte("1")); err != nil {
+		id1, err := log.Write([]byte("1"))
+		if err != nil {
 			tt.Errorf("no error: %+v", err)
 		}
-		if _, err := log.Write([]byte("2")); err != nil {
+		id2, err := log.Write([]byte("2"))
+		if err != nil {
 			tt.Errorf("no error: %+v", err)
 		}
-		if _, err := log.Read(Index(0)); err != nil {
+		if _, err := log.Read(id1); err != nil {
 			tt.Errorf("no error: %+v", err)
 		}
-		if _, err := log.Read(Index(1)); err != nil {
+		if _, err := log.Read(id2); err != nil {
 			tt.Errorf("no error: %+v", err)
 		}
-		if err := log.Delete(Index(0)); err != nil {
+		if err := log.Delete(id1); err != nil {
 			tt.Errorf("no error: %+v", err)
 		}
 
@@ -304,10 +306,10 @@ func TestLogBasicOP(t *testing.T) {
 		if err := log.WriteAt(Index(100), []byte("4")); errors.Is(err, ErrClosed) != true {
 			tt.Errorf("actual err=%+v", err)
 		}
-		if _, err := log.Read(Index(1)); errors.Is(err, ErrClosed) != true {
+		if _, err := log.Read(id2); errors.Is(err, ErrClosed) != true {
 			tt.Errorf("actual err=%+v", err)
 		}
-		if err := log.Delete(Index(1)); errors.Is(err, ErrClosed) != true {
+		if err := log.Delete(id2); errors.Is(err, ErrClosed) != true {
 			tt.Errorf("actual err=%+v", err)
 		}
 		if err := log.Compact(); errors.Is(err, ErrClosed) != true {
@@ -339,25 +341,20 @@ func TestLogBasicOP(t *testing.T) {
 			}
 			ids[i] = id
 		}
-		stPrev, err := log.wfile.Stat()
-		if err != nil {
-			tt.Fatalf("no error: %+v", err)
-		}
-		fileSize := stPrev.Size()
+		fileSize := log.Size()
 
 		if err := log.Delete(ids[0:50]...); err != nil {
 			tt.Errorf("no error: %+v", err)
 		}
-		reclaimable := int64(log.ReclaimableSpace())
+		reclaimable := log.ReclaimableSpace()
 		prevLastIndex := log.LastIndex()
 
 		if err := log.Compact(); err != nil {
 			tt.Errorf("no error: %+v", err)
 		}
 
-		stNew, err := log.wfile.Stat()
 		expectNewSize := fileSize - reclaimable
-		actualSize := stNew.Size()
+		actualSize := log.Size()
 		if expectNewSize != actualSize {
 			tt.Errorf("compact prev=%d after=%d reclaimable=%d expect=%d", fileSize, actualSize, reclaimable, expectNewSize)
 		}
