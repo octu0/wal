@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"testing"
@@ -278,19 +279,21 @@ func TestLogBasicOP(t *testing.T) {
 			tt.Fatalf("no error: %+v", err)
 		}
 
-		if _, err := log.Write([]byte("1")); err != nil {
+		id1, err := log.Write([]byte("1"))
+		if err != nil {
 			tt.Errorf("no error: %+v", err)
 		}
-		if _, err := log.Write([]byte("2")); err != nil {
+		id2, err := log.Write([]byte("2"))
+		if err != nil {
 			tt.Errorf("no error: %+v", err)
 		}
-		if _, err := log.Read(Index(0)); err != nil {
+		if _, err := log.Read(id1); err != nil {
 			tt.Errorf("no error: %+v", err)
 		}
-		if _, err := log.Read(Index(1)); err != nil {
+		if _, err := log.Read(id2); err != nil {
 			tt.Errorf("no error: %+v", err)
 		}
-		if err := log.Delete(Index(0)); err != nil {
+		if err := log.Delete(id1); err != nil {
 			tt.Errorf("no error: %+v", err)
 		}
 
@@ -304,10 +307,10 @@ func TestLogBasicOP(t *testing.T) {
 		if err := log.WriteAt(Index(100), []byte("4")); errors.Is(err, ErrClosed) != true {
 			tt.Errorf("actual err=%+v", err)
 		}
-		if _, err := log.Read(Index(1)); errors.Is(err, ErrClosed) != true {
+		if _, err := log.Read(id2); errors.Is(err, ErrClosed) != true {
 			tt.Errorf("actual err=%+v", err)
 		}
-		if err := log.Delete(Index(1)); errors.Is(err, ErrClosed) != true {
+		if err := log.Delete(id2); errors.Is(err, ErrClosed) != true {
 			tt.Errorf("actual err=%+v", err)
 		}
 		if err := log.Compact(); errors.Is(err, ErrClosed) != true {
@@ -339,25 +342,20 @@ func TestLogBasicOP(t *testing.T) {
 			}
 			ids[i] = id
 		}
-		stPrev, err := log.wfile.Stat()
-		if err != nil {
-			tt.Fatalf("no error: %+v", err)
-		}
-		fileSize := stPrev.Size()
+		fileSize := log.Size()
 
 		if err := log.Delete(ids[0:50]...); err != nil {
 			tt.Errorf("no error: %+v", err)
 		}
-		reclaimable := int64(log.ReclaimableSpace())
+		reclaimable := log.ReclaimableSpace()
 		prevLastIndex := log.LastIndex()
 
 		if err := log.Compact(); err != nil {
 			tt.Errorf("no error: %+v", err)
 		}
 
-		stNew, err := log.wfile.Stat()
 		expectNewSize := fileSize - reclaimable
-		actualSize := stNew.Size()
+		actualSize := log.Size()
 		if expectNewSize != actualSize {
 			tt.Errorf("compact prev=%d after=%d reclaimable=%d expect=%d", fileSize, actualSize, reclaimable, expectNewSize)
 		}
@@ -1028,5 +1026,116 @@ func TestLogCompactConcurrentWrite(t *testing.T) {
 	}
 	if uint64(log.Len()) != totalWritten {
 		t.Errorf("log drop detected expect=%d actual=%d", totalWritten, log.Len())
+	}
+}
+
+func TestLogSegments(t *testing.T) {
+	dir, err := os.MkdirTemp("", "waltest-*")
+	if err != nil {
+		t.Fatalf("no error: %+v", err)
+	}
+	t.Cleanup(func() {
+		os.RemoveAll(dir)
+	})
+
+	log, err := Open(dir, WithMaxSegmentSize(34))
+	if err != nil {
+		t.Fatalf("no error: %+v", err)
+	}
+	defer log.Close()
+
+	if 1 != log.Segments() {
+		t.Errorf("initial segoment 0")
+	}
+
+	// header(16) + 1 byte = 17
+	id1, err := log.Write([]byte("1"))
+	if err != nil {
+		t.Errorf("no error: %+v", err)
+	}
+	if 1 != log.Segments() {
+		t.Errorf("less than max segment size")
+	}
+	// header(16) + 1 byte = 34
+	id2, err := log.Write([]byte("2"))
+	if err != nil {
+		t.Errorf("no error: %+v", err)
+	}
+	if 1 != log.Segments() {
+		t.Errorf("eq max segment size: %d", log.Segments())
+	}
+	// header(16) + 4 = 54
+	id3, err := log.Write([]byte("test"))
+	if err != nil {
+		t.Errorf("no error: %+v", err)
+	}
+	if 2 != log.Segments() {
+		t.Errorf("add 1 segment: %d", log.Segments())
+	}
+	// header(16) + 20 = 36
+	id4, err := log.Write([]byte("01234567890123456789"))
+	if err != nil {
+		t.Errorf("no error: %+v", err)
+	}
+	if 3 != log.Segments() {
+		t.Errorf("add 1 segment: %d", log.Segments())
+	}
+
+	data1, err := log.Read(id1)
+	if err != nil {
+		t.Errorf("no error: %+v", err)
+	}
+	data2, err := log.Read(id2)
+	if err != nil {
+		t.Errorf("no error: %+v", err)
+	}
+	data3, err := log.Read(id3)
+	if err != nil {
+		t.Errorf("no error: %+v", err)
+	}
+	data4, err := log.Read(id4)
+	if err != nil {
+		t.Errorf("no error: %+v", err)
+	}
+
+	if bytes.Equal(data1, []byte("1")) != true {
+		t.Errorf("data1")
+	}
+	if bytes.Equal(data2, []byte("2")) != true {
+		t.Errorf("data2")
+	}
+	if bytes.Equal(data3, []byte("test")) != true {
+		t.Errorf("data3")
+	}
+	if bytes.Equal(data4, []byte("01234567890123456789")) != true {
+		t.Errorf("data4")
+	}
+
+	files, err := filepath.Glob(filepath.Join(dir, segmentFilePattern))
+	if err != nil {
+		t.Errorf("no error: %+v", err)
+	}
+	for _, f := range files {
+		t.Logf("exists %s", filepath.Base(f))
+	}
+
+	if err := log.Delete(id3, id4); err != nil {
+		t.Errorf("no error: %+v", err)
+	}
+
+	if err := log.Compact(); err != nil {
+		t.Errorf("no error: %+v", err)
+	}
+
+	if 3 != log.Segments() {
+		t.Errorf("add 1 (rotate...4) - 1(purge) segment: %d", log.Segments())
+	}
+
+	newFiles, err := filepath.Glob(filepath.Join(dir, segmentFilePattern))
+	if err != nil {
+		t.Errorf("no error: %+v", err)
+	}
+	for _, f := range newFiles {
+		t.Logf("exists(new) %s", filepath.Base(f))
 	}
 }
